@@ -1,40 +1,53 @@
 """
 api/server.py
 ─────────────
-FastAPI bridge between the CV backend and the Streamlit frontend.
+Headless FastAPI server for the 360° Surveillance Command & Control system.
+
+This is the ONLY process required.  It handles:
+  1. AI inference (OpenVINO INT8 via the vision engine).
+  2. MJPEG video streaming for all 4 cameras.
+  3. JSON REST API for stats, alerts, events, and metadata.
+  4. Serving the ultra-lightweight HTML dashboard (no Streamlit).
 
 Endpoints
----------
-GET  /                          → health check
+─────────
+GET  /                          → HTML dashboard (single-file SPA)
+GET  /api/health                → JSON health check
 GET  /video/{cam_id}            → MJPEG stream (multipart/x-mixed-replace)
 GET  /snapshot/{cam_id}         → single JPEG frame
-GET  /stats                     → JSON summary of all cameras
-GET  /alerts                    → JSON list of recent intrusion events
-POST /config/confidence         → update confidence threshold at runtime
+GET  /api/stats                 → JSON summary of all cameras
+GET  /api/alerts                → JSON list of recent intrusion events
+GET  /api/events                → JSON categorised event log
+GET  /api/metadata              → compact metadata (intrusion flag)
+GET  /api/config/confidence     → current confidence threshold
+POST /api/config/confidence     → update confidence threshold
 
 Architecture note
------------------
-The ``AnalyticsEngine`` is instantiated once at startup and runs its
-processing loop in a background thread.  FastAPI handlers simply *read*
-the shared ``stats`` dict and ``alerts`` deque — no inference happens
-inside request handlers, so latency stays sub-millisecond.
+─────────────────
+The AnalyticsEngine runs in a background thread.  FastAPI handlers
+simply *read* the shared stats dict — no inference happens inside
+request handlers, keeping response latency sub-millisecond.
 """
 
 from __future__ import annotations
 
-import io
+import os
 import time
 import asyncio
 import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse, Response
+from fastapi.responses import StreamingResponse, JSONResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config.settings import CAMERAS, CONFIDENCE_THRESHOLD, FASTAPI_HOST, FASTAPI_PORT
+from config.settings import (
+    CAMERAS, CONFIDENCE_THRESHOLD, FASTAPI_HOST, FASTAPI_PORT, JPEG_QUALITY,
+)
 from backend.vision_engine import CameraManager, AnalyticsEngine
 
 logger = logging.getLogger("api.server")
@@ -51,9 +64,10 @@ engine      = AnalyticsEngine(cam_manager, confidence=CONFIDENCE_THRESHOLD)
 # ════════════════════════════════════════════════════════════════════
 
 app = FastAPI(
-    title="360° Surveillance API",
-    version="1.0.0",
-    description="MJPEG streams and live stats for the Glass Box dashboard.",
+    title="360 Surveillance Command Center",
+    version="2.0.0",
+    description="Edge-optimised INT8 inference + ultra-lightweight HTML dashboard.",
+    docs_url="/docs",
 )
 
 app.add_middleware(
@@ -80,18 +94,39 @@ async def _shutdown():
     logger.info("Engine shut down")
 
 
-# ── Health check ─────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+#  HTML Dashboard (serves the single-file SPA)
+# ════════════════════════════════════════════════════════════════════
 
-@app.get("/")
+DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
+
+
+@app.get("/", response_class=HTMLResponse)
+def serve_dashboard():
+    """Serve the ultra-lightweight HTML/JS dashboard."""
+    if DASHBOARD_PATH.exists():
+        return HTMLResponse(
+            content=DASHBOARD_PATH.read_text(encoding="utf-8"),
+            status_code=200,
+        )
+    return HTMLResponse(
+        content="<h1>Dashboard not found</h1><p>Place index.html in frontend/</p>",
+        status_code=404,
+    )
+
+
+# ── JSON health check ────────────────────────────────────────────────
+
+@app.get("/api/health")
 def health():
-    return {"status": "running", "cameras": len(CAMERAS)}
+    return {"status": "running", "cameras": len(CAMERAS), "engine": "openvino-int8"}
 
 
 # ════════════════════════════════════════════════════════════════════
 #  MJPEG Streaming (multipart/x-mixed-replace)
 # ════════════════════════════════════════════════════════════════════
 
-def _encode_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
+def _encode_jpeg(frame: np.ndarray, quality: int = JPEG_QUALITY) -> bytes:
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return buf.tobytes() if ok else b""
 
@@ -99,7 +134,7 @@ def _encode_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
 async def _mjpeg_generator(cam_id: str, fps_cap: int = 15):
     """
     Async generator that yields MJPEG frames.
-    ``fps_cap`` limits bandwidth without changing inference speed.
+    fps_cap limits bandwidth without changing inference speed.
     """
     interval = 1.0 / fps_cap
     while True:
@@ -136,50 +171,56 @@ def snapshot(cam_id: str):
 
 
 # ════════════════════════════════════════════════════════════════════
-#  JSON Stats & Alerts
+#  JSON API  (/api/*)
 # ════════════════════════════════════════════════════════════════════
 
-@app.get("/stats")
+@app.get("/api/stats")
 def stats():
-    """
-    Returns per-camera detection counts, FPS, and intrusion totals.
-    Example response:
-    {
-      "cam_north": {"cam_label": "North Gate", "fps": 18.3,
-                    "detections": {"Person": 3, "Vehicle": 1},
-                    "intrusions": 1}
-    }
-    """
+    """Per-camera detection counts, FPS, and intrusion totals."""
     return JSONResponse(engine.get_stats_snapshot())
 
 
-@app.get("/alerts")
+@app.get("/api/alerts")
 def alerts(n: int = Query(50, ge=1, le=500)):
-    """Return the *n* most recent intrusion / PPE alerts."""
+    """Return the n most recent intrusion / PPE alerts."""
     return JSONResponse(engine.get_alerts(n))
 
 
-# ════════════════════════════════════════════════════════════════════
-#  Categorised Events (Triage view)
-# ════════════════════════════════════════════════════════════════════
-
-@app.get("/events")
+@app.get("/api/events")
 def events(n: int = Query(100, ge=1, le=500),
            category: str = Query(None)):
     """
     Return categorised detection events.
-    Optional ``category`` filter: "Human & PPE", "Vehicle & Plates", "Pet & Animal".
+    Optional category filter: "Human & PPE", "Vehicle & Plates", "Pet & Animal".
     """
     return JSONResponse(engine.get_events(n, category=category))
 
 
-@app.get("/metadata")
+@app.get("/api/metadata")
 def metadata():
     """
     Compact JSON metadata packet for the dashboard.
-    Includes ``intrusion_active`` flag so the frontend can trigger
-    the Red-Alert popup without parsing the full event stream.
+    Includes intrusion_active flag for the Red-Alert popup.
     """
+    return JSONResponse(engine.get_metadata_packet())
+
+
+# ── Backward-compatible aliases (old Streamlit routes) ────────────────
+
+@app.get("/stats")
+def stats_compat():
+    return JSONResponse(engine.get_stats_snapshot())
+
+@app.get("/alerts")
+def alerts_compat(n: int = Query(50, ge=1, le=500)):
+    return JSONResponse(engine.get_alerts(n))
+
+@app.get("/events")
+def events_compat(n: int = Query(100, ge=1, le=500), category: str = Query(None)):
+    return JSONResponse(engine.get_events(n, category=category))
+
+@app.get("/metadata")
+def metadata_compat():
     return JSONResponse(engine.get_metadata_packet())
 
 
@@ -191,16 +232,40 @@ class ConfidenceUpdate(BaseModel):
     value: float
 
 
-@app.post("/config/confidence")
+@app.post("/api/config/confidence")
 def set_confidence(body: ConfidenceUpdate):
-    """Adjust the detection confidence threshold (0.05 – 1.0)."""
+    """Adjust the detection confidence threshold (0.05 - 1.0)."""
     engine.confidence = body.value
     return {"confidence": engine.confidence}
 
 
-@app.get("/config/confidence")
+@app.get("/api/config/confidence")
 def get_confidence():
     return {"confidence": engine.confidence}
+
+
+# Backward-compatible aliases
+@app.post("/config/confidence")
+def set_confidence_compat(body: ConfidenceUpdate):
+    engine.confidence = body.value
+    return {"confidence": engine.confidence}
+
+@app.get("/config/confidence")
+def get_confidence_compat():
+    return {"confidence": engine.confidence}
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Camera list endpoint (for the HTML dashboard)
+# ════════════════════════════════════════════════════════════════════
+
+@app.get("/api/cameras")
+def camera_list():
+    """Return the list of configured cameras."""
+    return JSONResponse([
+        {"cam_id": c.cam_id, "label": c.label or c.cam_id, "uri": c.uri}
+        for c in CAMERAS
+    ])
 
 
 # ════════════════════════════════════════════════════════════════════

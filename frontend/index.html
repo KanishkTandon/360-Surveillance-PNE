@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Command &amp; Control — 360° Surveillance</title>
+<style>
+/* ════════════════════════════════════════════════════════════════════
+   Ultra-Lightweight Dark Theme — Zero Dependencies
+   ════════════════════════════════════════════════════════════════════ */
+:root {
+  --bg:          #0E1117;
+  --bg-card:     #161B22;
+  --bg-header:   #1A1F29;
+  --border:      #30363D;
+  --text:        #E6EDF3;
+  --text-dim:    #8B949E;
+  --accent:      #58A6FF;
+  --red:         #F85149;
+  --green:       #3FB950;
+  --yellow:      #D29922;
+  --radius:      8px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+a { color: var(--accent); text-decoration: none; }
+
+/* ── Header ────────────────────────────────────────────────────── */
+.header {
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.header h1 { font-size: 1.2rem; font-weight: 600; }
+.header h1 span { color: var(--accent); }
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+}
+.status-dot.offline { background: var(--red); }
+
+/* ── Red Alert Banner ──────────────────────────────────────────── */
+.alert-banner {
+  background: linear-gradient(90deg, #5c1010, #2d0808);
+  border: 1px solid var(--red);
+  padding: 12px 24px;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  animation: pulse-red 1.5s infinite alternate;
+}
+.alert-banner.active { display: flex; }
+@keyframes pulse-red {
+  0% { background: linear-gradient(90deg, #5c1010, #2d0808); }
+  100% { background: linear-gradient(90deg, #7a1515, #3d0a0a); }
+}
+.alert-banner .alert-text { font-weight: 600; font-size: 0.95rem; }
+.alert-banner .alert-text::before { content: "🚨 "; }
+.alert-banner button {
+  background: var(--red);
+  color: white;
+  border: none;
+  padding: 6px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.alert-banner button:hover { opacity: 0.85; }
+
+/* ── Metrics Row ───────────────────────────────────────────────── */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  padding: 16px 24px;
+}
+.metric-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  text-align: center;
+}
+.metric-card .value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+.metric-card .label {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+/* ── Camera Grid ───────────────────────────────────────────────── */
+.cam-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 0 24px 16px;
+}
+.cam-cell {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.cam-header {
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.cam-header .fps { color: var(--green); font-size: 0.8rem; }
+.cam-cell img {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: #000;
+  min-height: 200px;
+}
+.cam-footer {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+}
+
+/* ── Triage Tabs ───────────────────────────────────────────────── */
+.triage-section {
+  padding: 0 24px 24px;
+}
+.triage-section h2 {
+  font-size: 1rem;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+.tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 12px;
+}
+.tab-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 8px 20px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.2s;
+}
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.tab-btn:hover { color: var(--text); }
+
+/* ── Event Table ───────────────────────────────────────────────── */
+.event-table-wrap {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.event-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.event-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-header);
+  padding: 8px 12px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.event-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.event-table tr:hover { background: rgba(88, 166, 255, 0.05); }
+.intrusion-badge {
+  background: var(--red);
+  color: white;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+/* ── Sidebar Config Panel ──────────────────────────────────────── */
+.config-panel {
+  position: fixed;
+  top: 52px;
+  right: 0;
+  width: 280px;
+  height: calc(100vh - 52px);
+  background: var(--bg-card);
+  border-left: 1px solid var(--border);
+  padding: 20px;
+  overflow-y: auto;
+  z-index: 50;
+  transform: translateX(100%);
+  transition: transform 0.3s;
+}
+.config-panel.open { transform: translateX(0); }
+.config-toggle {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.config-panel h3 { font-size: 0.95rem; margin-bottom: 16px; }
+.config-panel label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.config-panel input[type="range"] { width: 100%; margin-bottom: 12px; }
+.conf-value {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+.recent-alerts { margin-top: 20px; }
+.recent-alerts h4 {
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+  color: var(--text-dim);
+}
+.alert-item {
+  font-size: 0.75rem;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.alert-item .alert-time { color: var(--yellow); font-weight: 600; }
+
+/* ── Responsive ────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .metrics { grid-template-columns: repeat(3, 1fr); }
+  .cam-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     HEADER
+     ═══════════════════════════════════════════════════════════════ -->
+<header class="header">
+  <h1>🛡️ <span>Command &amp; Control</span> — 360° Surveillance</h1>
+  <div class="header-status">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">Connecting...</span>
+    <button class="config-toggle" onclick="toggleConfig()">⚙️</button>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     RED ALERT BANNER
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="alert-banner" id="alertBanner">
+  <span class="alert-text" id="alertText">INTRUSION DETECTED</span>
+  <button onclick="acknowledgeAlert()">✅ Acknowledge</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     METRICS ROW
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="metrics">
+  <div class="metric-card">
+    <div class="value" id="metricPeople">0</div>
+    <div class="label">🧑 Active People</div>
+  </div>
+  <div class="metric-card">
+    <div class="value" id="metricVehicles">0</div>
+    <div class="label">🚗 Vehicles</div>
+  </div>
+  <div class="metric-card">
+    <div class="value" id="metricPets">0</div>
+    <div class="label">🐾 Pets</div>
+  </div>
+  <div class="metric-card">
+    <div class="value" id="metricIntrusions">0</div>
+    <div class="label">🚨 Intrusions</div>
+  </div>
+  <div class="metric-card">
+    <div class="value" id="metricFps">0</div>
+    <div class="label">⚡ Avg FPS</div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     CAMERA GRID (2x2)
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="cam-grid" id="camGrid">
+  <!-- Populated dynamically -->
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     TRIAGE TABS & EVENT LOG
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="triage-section">
+  <h2>📊 Event Triage</h2>
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('all', this)">All Events</button>
+    <button class="tab-btn" onclick="switchTab('Human & PPE', this)">🧑 Human &amp; PPE</button>
+    <button class="tab-btn" onclick="switchTab('Vehicle & Plates', this)">🚗 Vehicle &amp; Plates</button>
+    <button class="tab-btn" onclick="switchTab('Pet & Animal', this)">🐾 Pet &amp; Animal</button>
+  </div>
+  <div class="event-table-wrap">
+    <table class="event-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Camera</th>
+          <th>Category</th>
+          <th>Label</th>
+          <th>Confidence</th>
+          <th>Intrusion</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody id="eventBody">
+        <tr><td colspan="7" style="text-align:center; color:var(--text-dim);">Waiting for events...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     CONFIG SIDEBAR
+     ═══════════════════════════════════════════════════════════════ -->
+<aside class="config-panel" id="configPanel">
+  <h3>⚙️ Configuration</h3>
+  <label>Detection Confidence</label>
+  <input type="range" id="confSlider" min="5" max="100" value="45"
+         oninput="updateConfidence(this.value)">
+  <div><span class="conf-value" id="confValue">0.45</span></div>
+
+  <div class="recent-alerts">
+    <h4>🚨 Recent Alerts</h4>
+    <div id="alertList">
+      <div class="alert-item" style="color:var(--text-dim);">No alerts yet.</div>
+    </div>
+  </div>
+</aside>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     JAVASCRIPT — Vanilla, Zero Dependencies
+     ═══════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+  "use strict";
+
+  // ── Configuration ────────────────────────────────────────────────
+  const API_BASE   = window.location.origin;
+  const POLL_MS    = 2000;   // 2-second polling interval
+  const FPS_CAP    = 12;     // MJPEG FPS cap
+
+  let alertAcknowledged = false;
+  let currentTab        = "all";
+  let allEvents         = [];
+
+  // ── Init: fetch camera list and build grid ───────────────────────
+  async function init() {
+    try {
+      const res  = await fetch(`${API_BASE}/api/cameras`);
+      const cams = await res.json();
+      buildCameraGrid(cams);
+      updateStatus(true);
+    } catch (e) {
+      // Fallback: hardcoded camera IDs
+      buildCameraGrid([
+        { cam_id: "cam_north", label: "North Gate" },
+        { cam_id: "cam_south", label: "South Gate" },
+        { cam_id: "cam_east",  label: "East Perimeter" },
+        { cam_id: "cam_west",  label: "West Perimeter" },
+      ]);
+      updateStatus(false);
+    }
+
+    // Load current confidence
+    try {
+      const confRes = await fetch(`${API_BASE}/api/config/confidence`);
+      const confData = await confRes.json();
+      const slider = document.getElementById("confSlider");
+      slider.value = Math.round(confData.confidence * 100);
+      document.getElementById("confValue").textContent = confData.confidence.toFixed(2);
+    } catch (e) { /* ignore */ }
+
+    // Start polling
+    setInterval(pollData, POLL_MS);
+    pollData();
+  }
+
+  // ── Build camera grid ────────────────────────────────────────────
+  function buildCameraGrid(cameras) {
+    const grid = document.getElementById("camGrid");
+    grid.innerHTML = "";
+    cameras.forEach(cam => {
+      const cell = document.createElement("div");
+      cell.className = "cam-cell";
+      cell.id = `cam-${cam.cam_id}`;
+      cell.innerHTML = `
+        <div class="cam-header">
+          <span><span class="status-dot" id="dot-${cam.cam_id}"></span> ${cam.label}</span>
+          <span class="fps" id="fps-${cam.cam_id}">-- FPS</span>
+        </div>
+        <img src="${API_BASE}/video/${cam.cam_id}?fps=${FPS_CAP}"
+             alt="${cam.label}" loading="lazy"
+             onerror="this.style.opacity='0.3'">
+        <div class="cam-footer">
+          <span id="det-${cam.cam_id}">No detections</span>
+          <span id="intr-${cam.cam_id}">✅ Clear</span>
+        </div>
+      `;
+      grid.appendChild(cell);
+    });
+  }
+
+  // ── Poll API data ────────────────────────────────────────────────
+  async function pollData() {
+    try {
+      const [statsRes, metaRes, eventsRes, alertsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/stats`),
+        fetch(`${API_BASE}/api/metadata`),
+        fetch(`${API_BASE}/api/events?n=200`),
+        fetch(`${API_BASE}/api/alerts?n=20`),
+      ]);
+
+      const stats  = await statsRes.json();
+      const meta   = await metaRes.json();
+      const events = await eventsRes.json();
+      const alerts = await alertsRes.json();
+
+      updateStatus(true);
+      updateMetrics(stats);
+      updateCameraFooters(stats);
+      updateIntrusion(meta);
+      updateAlertList(alerts);
+
+      allEvents = events;
+      renderEvents();
+    } catch (e) {
+      updateStatus(false);
+    }
+  }
+
+  // ── Status indicator ─────────────────────────────────────────────
+  function updateStatus(online) {
+    const dot  = document.getElementById("statusDot");
+    const text = document.getElementById("statusText");
+    if (online) {
+      dot.className = "status-dot";
+      text.textContent = "System Online — INT8 Edge Mode";
+    } else {
+      dot.className = "status-dot offline";
+      text.textContent = "Backend Offline";
+    }
+  }
+
+  // ── Metrics ──────────────────────────────────────────────────────
+  function updateMetrics(stats) {
+    let people = 0, vehicles = 0, pets = 0, intrusions = 0;
+    let totalFps = 0, camCount = 0;
+
+    for (const [camId, s] of Object.entries(stats)) {
+      const det = s.detections || {};
+      people     += det["Person"]  || 0;
+      vehicles   += det["Vehicle"] || 0;
+      pets       += det["Pet"]     || 0;
+      intrusions += s.intrusions   || 0;
+      totalFps   += s.fps          || 0;
+      camCount++;
+    }
+
+    document.getElementById("metricPeople").textContent     = people;
+    document.getElementById("metricVehicles").textContent   = vehicles;
+    document.getElementById("metricPets").textContent       = pets;
+    document.getElementById("metricIntrusions").textContent = intrusions;
+    document.getElementById("metricFps").textContent        =
+        camCount > 0 ? (totalFps / camCount).toFixed(1) : "0";
+
+    // Color intrusion metric red if active
+    const intrCard = document.getElementById("metricIntrusions");
+    intrCard.style.color = intrusions > 0 ? "var(--red)" : "var(--accent)";
+  }
+
+  // ── Camera footers ──────────────────────────────────────────────
+  function updateCameraFooters(stats) {
+    for (const [camId, s] of Object.entries(stats)) {
+      const fpsEl  = document.getElementById(`fps-${camId}`);
+      const detEl  = document.getElementById(`det-${camId}`);
+      const intrEl = document.getElementById(`intr-${camId}`);
+      const dotEl  = document.getElementById(`dot-${camId}`);
+
+      if (fpsEl)  fpsEl.textContent  = `${s.fps} FPS`;
+      if (dotEl)  dotEl.className    = s.fps > 0 ? "status-dot" : "status-dot offline";
+
+      if (detEl) {
+        const det = s.detections || {};
+        const parts = Object.entries(det).map(([k, v]) => `${k}: ${v}`);
+        detEl.textContent = parts.length > 0 ? parts.join(" · ") : "No detections";
+      }
+
+      if (intrEl) {
+        intrEl.textContent = s.intrusions > 0
+          ? `🚨 ${s.intrusions} intrusion${s.intrusions > 1 ? "s" : ""}`
+          : "✅ Clear";
+        intrEl.style.color = s.intrusions > 0 ? "var(--red)" : "var(--green)";
+      }
+    }
+  }
+
+  // ── Intrusion banner ─────────────────────────────────────────────
+  function updateIntrusion(meta) {
+    const banner = document.getElementById("alertBanner");
+    const text   = document.getElementById("alertText");
+
+    if (meta.intrusion_active && !alertAcknowledged) {
+      banner.classList.add("active");
+      if (meta.latest_alert) {
+        text.textContent =
+          `RED ALERT — INTRUSION: ${meta.latest_alert.camera} — ${meta.latest_alert.detail}`;
+      } else {
+        text.textContent = "RED ALERT — INTRUSION DETECTED";
+      }
+    } else {
+      banner.classList.remove("active");
+      if (!meta.intrusion_active) alertAcknowledged = false;
+    }
+  }
+
+  // ── Alert list (sidebar) ─────────────────────────────────────────
+  function updateAlertList(alerts) {
+    const list = document.getElementById("alertList");
+    if (!alerts || alerts.length === 0) {
+      list.innerHTML = '<div class="alert-item" style="color:var(--text-dim);">No alerts yet.</div>';
+      return;
+    }
+    list.innerHTML = alerts.slice(0, 15).map(a => `
+      <div class="alert-item">
+        <span class="alert-time">${a.time}</span> — ${a.camera}<br>
+        ${a.detail}
+      </div>
+    `).join("");
+  }
+
+  // ── Event table rendering ────────────────────────────────────────
+  function renderEvents() {
+    const tbody = document.getElementById("eventBody");
+    let filtered = allEvents;
+    if (currentTab !== "all") {
+      filtered = allEvents.filter(e => e.category === currentTab);
+    }
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-dim);">No events in this category.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = filtered.slice(0, 150).map(e => `
+      <tr>
+        <td>${e.time}</td>
+        <td>${e.camera}</td>
+        <td>${e.category}</td>
+        <td>${e.label}</td>
+        <td>${(e.confidence * 100).toFixed(0)}%</td>
+        <td>${e.intrusion ? '<span class="intrusion-badge">INTRUSION</span>' : '—'}</td>
+        <td>${e.detail}</td>
+      </tr>
+    `).join("");
+  }
+
+  // ── Tab switching ────────────────────────────────────────────────
+  window.switchTab = function (category, btn) {
+    currentTab = category;
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    renderEvents();
+  };
+
+  // ── Acknowledge alert ────────────────────────────────────────────
+  window.acknowledgeAlert = function () {
+    alertAcknowledged = true;
+    document.getElementById("alertBanner").classList.remove("active");
+  };
+
+  // ── Config panel toggle ──────────────────────────────────────────
+  window.toggleConfig = function () {
+    document.getElementById("configPanel").classList.toggle("open");
+  };
+
+  // ── Confidence slider ────────────────────────────────────────────
+  let confTimeout = null;
+  window.updateConfidence = function (val) {
+    const conf = val / 100;
+    document.getElementById("confValue").textContent = conf.toFixed(2);
+    clearTimeout(confTimeout);
+    confTimeout = setTimeout(async () => {
+      try {
+        await fetch(`${API_BASE}/api/config/confidence`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: conf }),
+        });
+      } catch (e) { /* ignore */ }
+    }, 300);
+  };
+
+  // ── Boot ─────────────────────────────────────────────────────────
+  document.addEventListener("DOMContentLoaded", init);
+})();
+</script>
+</body>
+</html>

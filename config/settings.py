@@ -1,19 +1,30 @@
 """
 config/settings.py
 ──────────────────
-Central configuration for the 360° Surveillance System.
+Central configuration for the 360° Surveillance System (Edge-Optimised).
 Edit this file to add cameras, change model paths, or tune thresholds.
 """
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
+import os
 import numpy as np
 
 # ─────────────────────────── Model paths ───────────────────────────
-# Place your OpenVINO IR files (.xml + .bin) inside the models/ folder.
-# The default expects a YOLOv8n model exported via:
-#   yolo export model=yolov8n.pt format=openvino
+# INT8 OpenVINO IR model exported by  scripts/export_int8.py
 YOLO_MODEL_XML = "models/yolov8n_openvino_model/yolov8n.xml"
+
+# ─────────────────────────── OpenVINO Edge Tuning ──────────────────
+# Device: "CPU" for pure-CPU edge deployment. "AUTO" to let OV choose.
+OV_DEVICE:      str = "CPU"
+# Performance hint:
+#   "THROUGHPUT"  → maximise total FPS across all 4 cameras (edge default)
+#   "LATENCY"     → minimise per-frame latency (single-camera use)
+OV_PERF_HINT:   str = "THROUGHPUT"
+# Number of inference streams (0 = let OpenVINO auto-select based on cores)
+OV_NUM_STREAMS: int = 0
+# Pin to a specific thread count (0 = all available logical cores)
+OV_NUM_THREADS: int = 0
 
 # ─────────────────────────── Detection classes ─────────────────────
 # COCO-80 indices that map to our five target categories.
@@ -46,7 +57,9 @@ LABEL_ICONS: Dict[str, str] = {
 CONFIDENCE_THRESHOLD: float = 0.45        # default; adjustable from UI
 NMS_IOU_THRESHOLD:    float = 0.50
 INPUT_SIZE:           Tuple[int, int] = (640, 640)
-ASYNC_INFER_JOBS:     int = 4             # AsyncInferQueue depth
+# AsyncInferQueue depth — rule of thumb: physical_cores / 2
+# On a 4-core i5 → 2 slots; on an 8-core i7 → 4 slots
+ASYNC_INFER_JOBS:     int = max(2, (os.cpu_count() or 4) // 2)
 
 # ─────────────────────────── Cameras ───────────────────────────────
 @dataclass
@@ -99,6 +112,10 @@ TRIAGE_MAP: Dict[str, str] = {
 
 # ─────────────────────────── Shared state / IPC ────────────────────
 MAX_ALERT_HISTORY: int = 200               # rolling event log size
+
+# ─────────────────────────── Edge / Camera ─────────────────────────
+CAM_RECONNECT_DELAY: float = 0.5           # seconds before camera reconnect
+JPEG_QUALITY:        int   = 75            # MJPEG compression (lower = less bandwidth)
 
 # ─────────────────────────── Server ────────────────────────────────
 FASTAPI_HOST: str = "0.0.0.0"

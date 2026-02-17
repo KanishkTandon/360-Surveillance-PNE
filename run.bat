@@ -1,22 +1,30 @@
 @echo off
 :: ──────────────────────────────────────────────────────────────────────
-::  run.bat  —  Start FastAPI + Streamlit (Windows)
+::  run.bat  —  Start 360° Surveillance Edge System (Windows)
 :: ──────────────────────────────────────────────────────────────────────
-::  Usage:  run.bat
+::  The HTML dashboard is served directly by FastAPI at http://localhost:8000
+::  No Streamlit required — single process, minimal resource usage.
 :: ──────────────────────────────────────────────────────────────────────
 
 echo.
-echo  🚀  Launching 360° Surveillance System …
+echo  ==============================================
+echo    360 Surveillance — Edge Mode (INT8 / CPU)
+echo  ==============================================
 echo.
 
 set PYTHONPATH=%~dp0
+set PYTHONIOENCODING=utf-8
 
-:: 1. Start FastAPI in the background
-echo   ➜  Starting FastAPI server on http://localhost:8000
-start "FastAPI Server" /B python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
+:: Check if INT8 model exists
+if not exist "models\yolov8n_openvino_model\yolov8n.xml" (
+    echo   [!] INT8 model not found. Exporting now...
+    python scripts\export_int8.py
+    echo.
+)
 
-timeout /t 3 /nobreak >nul
-
-:: 2. Start Streamlit (foreground so you see its logs)
-echo   ➜  Starting Streamlit dashboard on http://localhost:8501
-streamlit run frontend/dashboard.py --server.port 8501
+:: Start FastAPI (serves both API + HTML dashboard)
+echo   Starting server on http://localhost:8000
+echo   Dashboard:  http://localhost:8000
+echo   API docs:   http://localhost:8000/docs
+echo.
+python -m uvicorn api.server:app --host 0.0.0.0 --port 8000

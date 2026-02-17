@@ -1,14 +1,24 @@
 """
 backend/vision_engine.py
 ────────────────────────
-AI backbone for the 360° Command & Control surveillance system.
+Zero-Lag, CPU-Only AI backbone for the 360° Command & Control system.
+
+Architecture (Edge-Optimised)
+─────────────────────────────
+  * OpenVINO INT8 model with THROUGHPUT performance hint so the runtime
+    automatically maps inference streams across all available CPU cores.
+  * ov.preprocess for hardware-accelerated image scaling + normalisation,
+    eliminating manual cv2.resize / float32 division.
+  * AsyncInferQueue (depth = physical_cores / 2) for pipelining frames
+    from all 4 cameras simultaneously -- the CPU is never idle.
+  * Ultralytics fallback kept ONLY for development convenience; the
+    production path is pure OpenVINO INT8.
 
 Classes
 -------
-  1. OpenVINOInference  – loads YOLOv8n IR model, runs AsyncInferQueue.
-  2. UltralyticsInference – fallback when OpenVINO is unavailable.
-  3. CameraManager      – threaded multi-camera capture (latest-frame-only).
-  4. AnalyticsEngine     – inference + intrusion geometry + Event triage.
+  1. OpenVINOInference  – compiled INT8 model with AsyncInferQueue.
+  2. CameraManager      – threaded multi-camera capture (latest-frame-only).
+  3. AnalyticsEngine     – inference + intrusion geometry + Event triage.
 
 Dataclasses
 -----------
@@ -21,6 +31,7 @@ Design: zero Streamlit / FastAPI imports — pure CV/AI engine.
 
 from __future__ import annotations
 
+import os
 import time
 import threading
 import logging
@@ -51,11 +62,17 @@ from config.settings import (
     CameraSource,
     MAX_ALERT_HISTORY,
     TRIAGE_MAP,
+    OV_DEVICE,
+    OV_PERF_HINT,
+    OV_NUM_STREAMS,
+    OV_NUM_THREADS,
+    CAM_RECONNECT_DELAY,
+    JPEG_QUALITY,
 )
 
 logger = logging.getLogger("vision_engine")
 logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s │ %(name)s │ %(levelname)s │ %(message)s")
+                    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -71,10 +88,7 @@ class TriageCategory(str, Enum):
 
 @dataclass
 class Event:
-    """
-    A single categorised detection event.
-    Stored in the rolling event log and served to the dashboard triage tabs.
-    """
+    """Single categorised detection event for the triage dashboard."""
     timestamp:    str
     camera_id:    str
     camera_label: str
@@ -83,7 +97,7 @@ class Event:
     confidence:   float = 0.0
     detail:       str = ""
     intrusion:    bool = False
-    image_crop:   Optional[bytes] = None   # JPEG bytes of bbox crop (optional)
+    image_crop:   Optional[bytes] = None
 
 
 @dataclass
@@ -109,43 +123,115 @@ class CameraStats:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  1. OpenVINO Inference Wrapper
+#  1. OpenVINO INT8 Inference Engine  (Zero-Lag Pipeline)
 # ════════════════════════════════════════════════════════════════════
 
 class OpenVINOInference:
+    """
+    High-performance OpenVINO inference with:
+      * Hardware-accelerated preprocessing (ov.preprocess)
+      * INT8 dispatch via THROUGHPUT hint (saturates all CPU cores)
+      * AsyncInferQueue for pipelined execution across cameras
+
+    AVX-512 / VNNI / AMX Note
+    ─────────────────────────
+    When the compiled model contains INT8 operations, OpenVINO's CPU
+    plugin automatically dispatches to the widest available SIMD path:
+      - AVX-512 VNNI   (Ice Lake, Tiger Lake, Alder Lake P)
+      - Intel AMX       (Sapphire Rapids, Granite Rapids)
+    This is transparent — no code change needed.  The performance hint
+    THROUGHPUT tells the runtime to create multiple inference streams
+    and pin them to cores for maximum utilisation.
+    """
+
     def __init__(self, model_xml: str = YOLO_MODEL_XML,
-                 device: str = "AUTO",
+                 device: str = OV_DEVICE,
                  n_jobs: int = ASYNC_INFER_JOBS):
         if not OV_AVAILABLE:
-            logger.warning("OpenVINO not installed — falling back to dummy inference.")
-            self.model = None
-            return
+            raise RuntimeError(
+                "OpenVINO is not installed.  Install with:  pip install openvino>=2024.0"
+            )
+
+        if not os.path.exists(model_xml):
+            raise FileNotFoundError(
+                f"INT8 model not found at '{model_xml}'.  "
+                "Run:  python scripts/export_int8.py"
+            )
 
         core = ov.Core()
-        model = core.read_model(model_xml)
-        model.reshape({model.input().any_name: ov.PartialShape([1, 3, *INPUT_SIZE])})
 
-        compiled = core.compile_model(model, device)
+        # ── Read model ──────────────────────────────────────────────
+        model = core.read_model(model_xml)
+
+        # ── Hardware-accelerated preprocessing ──────────────────────
+        #  Instead of manual cv2.resize + float32 division in Python,
+        #  we embed the preprocessing into the model graph itself.
+        #  OpenVINO compiles this into optimised SIMD kernels that run
+        #  on the same CPU pipeline as inference — zero Python overhead.
+        ppp = ov.preprocess.PrePostProcessor(model)
+
+        # Input: BGR uint8 image of any size (will be resized by HW)
+        ppp.input().tensor() \
+            .set_element_type(ov.Type.u8) \
+            .set_layout(ov.Layout("NHWC")) \
+            .set_spatial_dynamic_shape()
+
+        # Model expects: FP32 [1, 3, 640, 640]  (NCHW, 0-1 normalised)
+        ppp.input().preprocess() \
+            .resize(ov.preprocess.ResizeAlgorithm.RESIZE_LINEAR) \
+            .convert_element_type(ov.Type.f32) \
+            .scale(255.0) \
+            .convert_layout(ov.Layout("NCHW"))
+
+        ppp.input().model().set_layout(ov.Layout("NCHW"))
+
+        model = ppp.build()
+
+        # ── Static batch shape  (NHWC for input tensor) ─────────────
+        model.reshape({model.input().any_name: ov.PartialShape([1, *INPUT_SIZE, 3])})
+
+        # ── Compile with THROUGHPUT hint ────────────────────────────
+        #  THROUGHPUT mode creates multiple internal inference streams
+        #  (typically = physical cores / 2) and distributes work across
+        #  them.  Perfect for our 4-camera scenario where we want to
+        #  saturate the CPU across all feeds simultaneously.
+        config: Dict[str, str] = {
+            "PERFORMANCE_HINT": OV_PERF_HINT,
+        }
+        if OV_NUM_STREAMS:
+            config["NUM_STREAMS"] = str(OV_NUM_STREAMS)
+        if OV_NUM_THREADS:
+            config["INFERENCE_NUM_THREADS"] = str(OV_NUM_THREADS)
+
+        compiled = core.compile_model(model, device, config)
+
         self._input_name  = compiled.input().any_name
         self._output_name = compiled.output().any_name
 
+        # ── AsyncInferQueue ─────────────────────────────────────────
         self._queue = AsyncInferQueue(compiled, n_jobs)
         self._queue.set_callback(self._on_done)
 
-        self._results: Dict[int, Any] = {}
+        self._results: Dict[int, np.ndarray] = {}
         self._lock = threading.Lock()
-        logger.info("OpenVINO model loaded on '%s'  (%d async slots)", device, n_jobs)
 
+        logger.info(
+            "OpenVINO INT8 model loaded  |  device=%s  |  hint=%s  |  async_slots=%d",
+            device, OV_PERF_HINT, n_jobs,
+        )
+
+    # ── Preprocessing (hardware-accelerated) ─────────────────────────
     @staticmethod
     def preprocess(frame: np.ndarray) -> np.ndarray:
-        img = cv2.resize(frame, INPUT_SIZE)
-        img = img.astype(np.float32) / 255.0
-        img = img.transpose(2, 0, 1)
-        return np.expand_dims(img, axis=0)
+        """
+        Minimal preprocessing: just add batch dim.
+        All resize / normalize / layout-transpose is done inside the
+        compiled model via ov.preprocess — runs on SIMD, not Python.
+        """
+        return np.expand_dims(frame, axis=0)  # (H, W, 3) -> (1, H, W, 3)
 
+    # ── Async submission ─────────────────────────────────────────────
     def submit(self, tensor: np.ndarray, job_id: int) -> None:
-        if self.model is None:
-            return
         self._queue.start_async({self._input_name: tensor}, userdata=job_id)
 
     def _on_done(self, infer_request, userdata):
@@ -158,15 +244,16 @@ class OpenVINOInference:
             return self._results.pop(job_id, None)
 
     def wait_all(self):
-        if self.model is not None:
-            self._queue.wait_all()
+        self._queue.wait_all()
 
+    # ── NMS + decode ─────────────────────────────────────────────────
     @staticmethod
     def postprocess(raw: np.ndarray,
                     orig_shape: Tuple[int, int],
                     conf_thr: float = CONFIDENCE_THRESHOLD,
                     iou_thr: float = NMS_IOU_THRESHOLD
                     ) -> List[Dict]:
+        """Decode YOLOv8 raw output tensor -> list of detection dicts."""
         predictions = np.squeeze(raw).T
         if predictions.ndim != 2:
             return []
@@ -183,13 +270,17 @@ class OpenVINOInference:
         max_scores = max_scores[mask]
         class_ids = class_scores.argmax(axis=1)
 
-        x1 = cx - w / 2;  y1 = cy - h / 2
-        x2 = cx + w / 2;  y2 = cy + h / 2
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
 
         oh, ow = orig_shape[:2]
         sx, sy = ow / INPUT_SIZE[0], oh / INPUT_SIZE[1]
-        x1, x2 = (x1 * sx).astype(int), (x2 * sx).astype(int)
-        y1, y2 = (y1 * sy).astype(int), (y2 * sy).astype(int)
+        x1 = (x1 * sx).astype(int)
+        x2 = (x2 * sx).astype(int)
+        y1 = (y1 * sy).astype(int)
+        y2 = (y2 * sy).astype(int)
 
         boxes_for_nms = np.stack([x1, y1, x2 - x1, y2 - y1], axis=1).tolist()
         indices = cv2.dnn.NMSBoxes(boxes_for_nms, max_scores.tolist(), conf_thr, iou_thr)
@@ -213,38 +304,16 @@ class OpenVINOInference:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  FALLBACK: ultralytics-based inference
-# ════════════════════════════════════════════════════════════════════
-
-class UltralyticsInference:
-    def __init__(self, model_path: str = "yolov8n.pt"):
-        from ultralytics import YOLO
-        self._model = YOLO(model_path)
-        logger.info("Ultralytics YOLO loaded (%s)", model_path)
-
-    def detect(self, frame: np.ndarray, conf: float = CONFIDENCE_THRESHOLD) -> List[Dict]:
-        results = self._model(frame, conf=conf, verbose=False)[0]
-        detections = []
-        for box in results.boxes:
-            cid = int(box.cls[0])
-            label = TARGET_CLASSES.get(cid)
-            if label is None:
-                continue
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            detections.append({
-                "bbox":       (int(x1), int(y1), int(x2), int(y2)),
-                "class_id":   cid,
-                "label":      label,
-                "confidence": float(box.conf[0]),
-            })
-        return detections
-
-
-# ════════════════════════════════════════════════════════════════════
-#  2. Camera Manager (threaded capture)
+#  2. Camera Manager (threaded capture — latest-frame-only)
 # ════════════════════════════════════════════════════════════════════
 
 class CameraManager:
+    """
+    One thread per camera.  Each thread grabs frames as fast as the
+    source delivers them and overwrites a single shared buffer.
+    Consumers always get the *latest* frame — no queue lag.
+    """
+
     def __init__(self, sources: List[CameraSource] | None = None):
         self._sources = sources or CAMERAS
         self._frames: Dict[str, Optional[np.ndarray]] = {}
@@ -264,7 +333,10 @@ class CameraManager:
     def stop(self):
         self._running = False
         for cap in self._caps.values():
-            cap.release()
+            try:
+                cap.release()
+            except Exception:
+                pass
 
     def get_frame(self, cam_id: str) -> Optional[np.ndarray]:
         lock = self._locks.get(cam_id)
@@ -296,8 +368,8 @@ class CameraManager:
         while self._running:
             ok, frame = cap.read()
             if not ok:
-                logger.warning("Frame drop on %s - retrying", src.cam_id)
-                time.sleep(0.5)
+                logger.warning("Frame drop on %s — reconnecting", src.cam_id)
+                time.sleep(CAM_RECONNECT_DELAY)
                 cap.release()
                 cap = cv2.VideoCapture(uri)
                 self._caps[src.cam_id] = cap
@@ -307,17 +379,17 @@ class CameraManager:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  3. Analytics Engine — inference + intrusion + Event triage
+#  3. Analytics Engine  (inference + intrusion + Event triage)
 # ════════════════════════════════════════════════════════════════════
 
 class AnalyticsEngine:
     """
     Main processing loop.
-    - Grabs frames from CameraManager
-    - Runs inference (OpenVINO or Ultralytics fallback)
-    - Performs intrusion geometry checks
-    - Categorises detections into triage Events
-    - Publishes annotated frames, stats, events, and alerts
+    - Grabs frames from CameraManager.
+    - Runs inference via OpenVINO INT8 AsyncInferQueue.
+    - Performs intrusion geometry checks (ROI polygons).
+    - Categorises detections into triage Events.
+    - Publishes annotated frames, stats, events, and alerts.
     """
 
     def __init__(self, cam_manager: CameraManager,
@@ -325,19 +397,28 @@ class AnalyticsEngine:
         self._cam = cam_manager
         self._confidence = confidence
 
-        if OV_AVAILABLE:
+        # ── Inference engine init ────────────────────────────────────
+        try:
+            self._infer = OpenVINOInference()
+            self._use_ov = True
+            logger.info("Using OpenVINO INT8 inference pipeline")
+        except (RuntimeError, FileNotFoundError) as exc:
+            logger.error("OpenVINO init failed: %s", exc)
+            logger.error("Run  'python scripts/export_int8.py'  to create the INT8 model.")
+            # Fallback to Ultralytics if available (development only)
             try:
-                self._infer = OpenVINOInference()
-                self._use_ov = True
-            except Exception as exc:
-                logger.warning("OpenVINO init failed (%s) -- falling back", exc)
-                self._infer = UltralyticsInference()
+                from ultralytics import YOLO
+                self._fallback = YOLO("yolov8n.pt")
                 self._use_ov = False
-        else:
-            self._infer = UltralyticsInference()
-            self._use_ov = False
+                logger.warning("FALLBACK: Using Ultralytics PyTorch (dev mode only)")
+            except ImportError:
+                self._fallback = None
+                self._use_ov = False
+                logger.error(
+                    "No inference backend available — system will produce no detections"
+                )
 
-        # Shared state
+        # ── Shared state ─────────────────────────────────────────────
         self.stats:  Dict[str, CameraStats] = {}
         self.alerts: deque[AlertEvent] = deque(maxlen=MAX_ALERT_HISTORY)
         self.events: deque[Event]      = deque(maxlen=MAX_ALERT_HISTORY)
@@ -362,7 +443,7 @@ class AnalyticsEngine:
     def stop(self):
         self._running = False
 
-    # ── main processing loop ─────────────────────────────────────────
+    # ── Main processing loop ─────────────────────────────────────────
     def _loop(self):
         while self._running:
             any_intrusion = False
@@ -429,9 +510,10 @@ class AnalyticsEngine:
             with self._lock:
                 self.intrusion_active = any_intrusion
 
-            time.sleep(0.01)
+            time.sleep(0.005)  # 5 ms yield — prevents busy-spin
 
     def _run_inference(self, frame: np.ndarray) -> List[Dict]:
+        """Run inference through OpenVINO INT8 or fallback."""
         if self._use_ov:
             tensor = OpenVINOInference.preprocess(frame)
             self._infer.submit(tensor, job_id=0)
@@ -439,10 +521,31 @@ class AnalyticsEngine:
             raw = self._infer.get_result(0)
             if raw is None:
                 return []
-            return OpenVINOInference.postprocess(raw, frame.shape,
-                                                  conf_thr=self._confidence)
+            return OpenVINOInference.postprocess(
+                raw, frame.shape, conf_thr=self._confidence
+            )
+        elif hasattr(self, "_fallback") and self._fallback is not None:
+            return self._run_fallback(frame)
         else:
-            return self._infer.detect(frame, conf=self._confidence)
+            return []
+
+    def _run_fallback(self, frame: np.ndarray) -> List[Dict]:
+        """Ultralytics fallback for development without INT8 model."""
+        results = self._fallback(frame, conf=self._confidence, verbose=False)[0]
+        detections = []
+        for box in results.boxes:
+            cid = int(box.cls[0])
+            label = TARGET_CLASSES.get(cid)
+            if label is None:
+                continue
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            detections.append({
+                "bbox":       (int(x1), int(y1), int(x2), int(y2)),
+                "class_id":   cid,
+                "label":      label,
+                "confidence": float(box.conf[0]),
+            })
+        return detections
 
     @staticmethod
     def _check_intrusions(detections: List[Dict],
@@ -464,6 +567,7 @@ class AnalyticsEngine:
                   detections: List[Dict],
                   intrusions: List[Dict],
                   source: Optional[CameraSource]) -> np.ndarray:
+        # Draw ROI polygon
         if source and source.roi_poly:
             pts = np.array(source.roi_poly, dtype=np.int32).reshape((-1, 1, 2))
             cv2.polylines(frame, [pts], isClosed=True,
@@ -543,10 +647,7 @@ class AnalyticsEngine:
             return self.intrusion_active
 
     def get_metadata_packet(self) -> Dict:
-        """
-        Compact JSON metadata packet sent alongside video streams.
-        The frontend uses this to trigger the Red-Alert popup.
-        """
+        """Compact JSON metadata packet for the dashboard."""
         with self._lock:
             return {
                 "intrusion_active": self.intrusion_active,

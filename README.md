@@ -247,9 +247,3 @@ For multi-node / high-availability setups, swap the in-memory state with:
 - **Redis** (pub/sub + streams)
 - **ZeroMQ** (for low-latency frame transport)
 - **Apache Kafka** (for durable event logs)
-
----
-
-## 📜 License
-
-MIT — use freely for commercial and personal projects.

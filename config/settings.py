@@ -63,19 +63,19 @@ class CameraSource:
 CAMERAS: List[CameraSource] = [
     CameraSource(
         cam_id="cam_north",
-        uri="0",                            # laptop webcam for dev
+        uri="rtsp://192.168.3.35:554/ch01.264",                            # laptop webcam for dev
         label="North Gate",
         roi_poly=[(100, 100), (500, 100), (500, 400), (100, 400)],
     ),
     CameraSource(
         cam_id="cam_south",
-        uri="0",
+        uri="rtsp://192.168.3.5:554/ch01.264",
         label="South Gate",
         roi_poly=[],
     ),
     CameraSource(
         cam_id="cam_east",
-        uri="0",
+        uri="rtsp://192.168.3.12:554/ch01.264",
         label="East Perimeter",
         roi_poly=[(200, 150), (600, 150), (600, 450), (200, 450)],
     ),

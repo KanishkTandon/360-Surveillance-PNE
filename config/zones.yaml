@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────
+#  config/zones.yaml
+#  Intrusion zone polygons for each camera (N, S, E, W views)
+#
+#  Each polygon is a list of [x, y] vertices (clockwise).
+#  An empty list means "no intrusion zone" for that camera.
+# ─────────────────────────────────────────────────────────────
+
+cam_north:
+  label: "North Gate Zone"
+  polygon:
+    - [100, 100]
+    - [500, 100]
+    - [500, 400]
+    - [100, 400]
+
+cam_south:
+  label: "South Gate Zone"
+  polygon: []
+
+cam_east:
+  label: "East Perimeter Zone"
+  polygon:
+    - [200, 150]
+    - [600, 150]
+    - [600, 450]
+    - [200, 450]
+
+cam_west:
+  label: "West Perimeter Zone"
+  polygon: []

@@ -1,0 +1,21 @@
+# ──────────────────────────────────────────────
+#  360° Surveillance System — Python Dependencies
+# ──────────────────────────────────────────────
+
+# ── AI / CV ──────────────────────────────────
+ultralytics>=8.1.0          # YOLOv8  (also pulls in torch)
+openvino>=2024.0.0          # OpenVINO runtime + AsyncInferQueue
+opencv-python>=4.9.0        # cv2
+
+# ── Backend API ──────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.6.0
+
+# ── Frontend ─────────────────────────────────
+streamlit>=1.31.0
+requests>=2.31.0
+pandas>=2.2.0
+
+# ── Utilities ────────────────────────────────
+numpy>=1.26.0
